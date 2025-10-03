@@ -1,0 +1,148 @@
+name: Deploy Customer Lambda
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  remote-config:
+    name: "Remote Config Setup"
+    runs-on: ubuntu-latest
+    outputs:
+      db_host: ${{ steps.set-outputs.outputs.db_host }}
+      db_user: ${{ steps.set-outputs.outputs.db_user }}
+      db_password: ${{ steps.set-outputs.outputs.db_password }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install AWS CLI if running in act
+        if: env.ACT == 'true'
+        run: |
+          echo "Running under act, installing AWS CLI..."
+          sudo apt-get update -y
+          sudo apt-get install -y unzip curl
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip
+          sudo ./aws/install
+
+      - name: Get remote config from Database at Parameter Store (Diagnóstico)
+        run: |
+          echo "=== LISTANDO TODOS OS PARÂMETROS /main/ ==="
+          aws ssm describe-parameters --parameter-filters "Key=Name,Option=BeginsWith,Values=/main/" --query "Parameters[].Name" --output table || echo "Falha ao listar parâmetros /main/"
+
+          echo "=== LISTANDO TODOS OS PARÂMETROS (SEM FILTRO) ==="  
+          aws ssm describe-parameters --query "Parameters[].Name" --output table | head -20 || echo "Falha ao listar parâmetros"
+
+          echo "=== TENTANDO VÁRIAS VARIAÇÕES DO NOME ==="
+
+          # Testando diferentes nomes possíveis
+          for param_name in "/main/rds_endpoint" "/main/rds-endpoint" "/main/db_host" "/main/database_host" "/main/rds_host"; do
+            echo "Testando: $param_name"
+            if aws ssm get-parameter --name "$param_name" --with-decryption --query "Parameter.Value" --output text 2>/dev/null; then
+              echo "✅ ENCONTRADO: $param_name"
+              aws ssm get-parameter --name "$param_name" --with-decryption --query "Parameter.Value" --output text > db_host.txt
+              break
+            else
+              echo "❌ NÃO ENCONTRADO: $param_name"
+            fi
+          done
+
+          # Se nenhum foi encontrado, deixa vazio
+          if [ ! -f db_host.txt ]; then
+            echo "" > db_host.txt
+            echo "⚠️  NENHUM PARÂMETRO DE HOST ENCONTRADO - usando valor vazio"
+          fi
+
+          echo "=== OBTENDO OUTROS PARÂMETROS ==="
+          aws ssm get-parameter --name "/main/db_username" --with-decryption --query "Parameter.Value" --output text > db_user.txt
+          aws ssm get-parameter --name "/main/db_password" --with-decryption --query "Parameter.Value" --output text > db_password.txt
+
+          echo "DB_HOST obtido: '$(cat db_host.txt)'"
+          echo "DB_USER obtido: '$(cat db_user.txt)'"
+          echo "DB_PASSWORD obtido: '$(cat db_password.txt | head -c 10)...'"
+
+      - name: Set outputs (Diagnóstico)
+        id: set-outputs
+        run: |
+          echo "=== CONTEÚDO DOS ARQUIVOS ANTES DOS OUTPUTS ==="
+          echo "db_host.txt: '$(cat db_host.txt)'"
+          echo "db_user.txt: '$(cat db_user.txt)'"
+          echo "db_password.txt: '$(cat db_password.txt | head -c 10)...'"
+
+          echo "=== DEBUG: Caracteres invisíveis ==="
+          echo "HOST com delimitadores: |$(cat db_host.txt)|"
+          echo "HOST hex dump: $(cat db_host.txt | hexdump -C | head -1)"
+
+          # Simplificando a limpeza - só remover quebras de linha
+          DB_HOST_VALUE=$(cat db_host.txt | tr -d '\n')
+          DB_USER_VALUE=$(cat db_user.txt | tr -d '\n')
+          DB_PASSWORD_VALUE=$(cat db_password.txt | tr -d '\n')
+
+          echo "=== VALORES LIMPOS PARA OUTPUTS ==="
+          echo "db_host: '${DB_HOST_VALUE}'"
+          echo "db_user: '${DB_USER_VALUE}'"
+          echo "db_password: '$(echo ${DB_PASSWORD_VALUE} | head -c 10)...'"
+          echo "db_host length: ${#DB_HOST_VALUE}"
+
+          echo "db_host=${DB_HOST_VALUE}" >> $GITHUB_OUTPUT
+          echo "db_user=${DB_USER_VALUE}" >> $GITHUB_OUTPUT
+          echo "db_password=${DB_PASSWORD_VALUE}" >> $GITHUB_OUTPUT
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: remote-config
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Debug received outputs
+        run: |
+          echo "=== DEBUG: Valores recebidos do remote-config ==="
+          echo "db_host: '${{ needs.remote-config.outputs.db_host }}'"
+          echo "db_user: '${{ needs.remote-config.outputs.db_user }}'"
+          echo "db_password: '${{ needs.remote-config.outputs.db_password }}'"
+          echo "db_host length: $(echo '${{ needs.remote-config.outputs.db_host }}' | wc -c)"
+          echo "============================================="
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install Serverless Framework
+        run: npm install -g serverless
+
+      - name: Deploy Customer Lambda
+        run: sls deploy --stage main --config serverless-prod.yml
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          DB_HOST: ${{ needs.remote-config.outputs.db_host }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ needs.remote-config.outputs.db_user }}
+          DB_PASSWORD: ${{ needs.remote-config.outputs.db_password }}

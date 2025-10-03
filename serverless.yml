@@ -1,0 +1,41 @@
+service: serverless-aws-lambda
+
+frameworkVersion: '3'
+
+plugins:
+  - serverless-plugin-typescript
+
+custom:
+  serverless-plugin-typescript:
+    tsConfigFileLocation: './tsconfig.json'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  memorySize: 512
+  timeout: 30
+
+  environment:
+    STAGE: ${self:provider.stage}
+    REGION: ${self:provider.region}
+    # RDS PostgreSQL connection (from secrets)
+    DB_HOST: ${env:DB_HOST, 'localhost'}
+    DB_NAME: ${env:DB_NAME, 'customers_db'}
+    DB_USER: ${env:DB_USER, 'postgres'}
+    DB_PASSWORD: ${env:DB_PASSWORD, 'password'}
+
+functions:
+  getCustomer:
+    handler: src/handler.getCustomer
+    description: 'Get customer by CPF from PostgreSQL RDS'
+    events:
+      - http:
+          path: /customers
+          method: get
+          cors: true
+          request:
+            parameters:
+              querystrings:
+                cpf: true
