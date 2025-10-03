@@ -1,4 +1,4 @@
-name: Deploy Customer Lambda
+name: Deploy Lambda to AWS
 
 on:
   push:
@@ -8,17 +8,10 @@ on:
 
 jobs:
   remote-config:
-    name: "Remote Config Setup"
+    name: "Get Database Configuration"
     runs-on: ubuntu-latest
-    outputs:
-      db_host: ${{ steps.set-outputs.outputs.db_host }}
-      db_user: ${{ steps.set-outputs.outputs.db_user }}
-      db_password: ${{ steps.set-outputs.outputs.db_password }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -27,90 +20,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Install AWS CLI if running in act
-        if: env.ACT == 'true'
+      - name: Get database configuration from Parameter Store
         run: |
-          echo "Running under act, installing AWS CLI..."
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip -q awscliv2.zip
-          sudo ./aws/install
+          # Get database configuration from SSM Parameter Store
+          aws ssm get-parameter --name "/main/rds_endpoint" --with-decryption --query "Parameter.Value" --output text > /tmp/db_host 2>/dev/null || echo "" > /tmp/db_host
+          aws ssm get-parameter --name "/main/db_username" --with-decryption --query "Parameter.Value" --output text > /tmp/db_user 2>/dev/null || echo "" > /tmp/db_user
+          aws ssm get-parameter --name "/main/db_password" --with-decryption --query "Parameter.Value" --output text > /tmp/db_password 2>/dev/null || echo "" > /tmp/db_password
 
-      - name: Get remote config from Database at Parameter Store (Diagnóstico)
-        run: |
-          echo "=== LISTANDO TODOS OS PARÂMETROS /main/ ==="
-          aws ssm describe-parameters --parameter-filters "Key=Name,Option=BeginsWith,Values=/main/" --query "Parameters[].Name" --output table || echo "Falha ao listar parâmetros /main/"
+          # Clean values (remove newlines and whitespace)
+          sed -i 's/[[:space:]]*$//' /tmp/db_host /tmp/db_user /tmp/db_password
 
-          echo "=== LISTANDO TODOS OS PARÂMETROS (SEM FILTRO) ==="  
-          aws ssm describe-parameters --query "Parameters[].Name" --output table | head -20 || echo "Falha ao listar parâmetros"
-
-          echo "=== TENTANDO VÁRIAS VARIAÇÕES DO NOME ==="
-
-          # Testando diferentes nomes possíveis
-          for param_name in "/main/rds_endpoint" "/main/rds-endpoint" "/main/db_host" "/main/database_host" "/main/rds_host"; do
-            echo "Testando: $param_name"
-            if aws ssm get-parameter --name "$param_name" --with-decryption --query "Parameter.Value" --output text 2>/dev/null; then
-              echo "✅ ENCONTRADO: $param_name"
-              aws ssm get-parameter --name "$param_name" --with-decryption --query "Parameter.Value" --output text > db_host.txt
-              break
-            else
-              echo "❌ NÃO ENCONTRADO: $param_name"
-            fi
-          done
-
-          # Se nenhum foi encontrado, deixa vazio
-          if [ ! -f db_host.txt ]; then
-            echo "" > db_host.txt
-            echo "⚠️  NENHUM PARÂMETRO DE HOST ENCONTRADO - usando valor vazio"
-          fi
-
-          echo "=== OBTENDO OUTROS PARÂMETROS ==="
-          aws ssm get-parameter --name "/main/db_username" --with-decryption --query "Parameter.Value" --output text > db_user.txt
-          aws ssm get-parameter --name "/main/db_password" --with-decryption --query "Parameter.Value" --output text > db_password.txt
-
-          echo "DB_HOST obtido: '$(cat db_host.txt)'"
-          echo "DB_USER obtido: '$(cat db_user.txt)'"
-          echo "DB_PASSWORD obtido: '$(cat db_password.txt | head -c 10)...'"
-
-      - name: Set outputs (Diagnóstico)
-        id: set-outputs
-        run: |
-          echo "=== CONTEÚDO DOS ARQUIVOS ANTES DOS OUTPUTS ==="
-          echo "db_host.txt: '$(cat db_host.txt)'"
-          echo "db_user.txt: '$(cat db_user.txt)'"
-          echo "db_password.txt: '$(cat db_password.txt | head -c 10)...'"
-
-          echo "=== DEBUG: Caracteres invisíveis ==="
-          echo "HOST com delimitadores: |$(cat db_host.txt)|"
-          echo "HOST hex dump: $(cat db_host.txt | hexdump -C | head -1)"
-
-          # Limpeza mais robusta - remover quebras de linha, espaços e caracteres invisíveis
-          DB_HOST_VALUE=$(cat db_host.txt | tr -d '\n\r\t ' | sed 's/[[:space:]]//g')
-          DB_USER_VALUE=$(cat db_user.txt | tr -d '\n\r\t ' | sed 's/[[:space:]]//g')
-          DB_PASSWORD_VALUE=$(cat db_password.txt | tr -d '\n\r\t ')
-
-          echo "=== VALORES LIMPOS PARA OUTPUTS ==="
-          echo "db_host: '${DB_HOST_VALUE}'"
-          echo "db_user: '${DB_USER_VALUE}'"
-          echo "db_password: '$(echo ${DB_PASSWORD_VALUE} | head -c 10)...'"
-          echo "db_host length: ${#DB_HOST_VALUE}"
-
-          # Verificar se valores estão vazios e forçar saída se necessário
-          if [ -z "$DB_HOST_VALUE" ]; then
-            echo "❌ ERRO: DB_HOST está vazio após limpeza!"
+          # Verify required values are present
+          if [ ! -s /tmp/db_host ]; then
+            echo "❌ ERROR: Database host not found in Parameter Store"
             exit 1
           fi
 
-          # Salvar como arquivos para evitar masking do GitHub
-          echo "$DB_HOST_VALUE" > /tmp/db_host
-          echo "$DB_USER_VALUE" > /tmp/db_user  
-          echo "$DB_PASSWORD_VALUE" > /tmp/db_password
-
-          # Também definir como outputs (mesmo que sejam mascarados)
-          echo "db_host=$DB_HOST_VALUE" >> $GITHUB_OUTPUT
-          echo "db_user=$DB_USER_VALUE" >> $GITHUB_OUTPUT
-          echo "db_password=$DB_PASSWORD_VALUE" >> $GITHUB_OUTPUT
+          echo "✅ Database configuration retrieved successfully"
 
       - name: Upload database config as artifacts
         uses: actions/upload-artifact@v4
@@ -145,21 +71,13 @@ jobs:
           name: db-config
           path: /tmp/
 
-      - name: Load database config and debug
+      - name: Load database configuration
         run: |
-          echo "=== CARREGANDO CONFIGURAÇÕES DO BANCO ==="
-          DB_HOST_FROM_FILE=$(cat /tmp/db_host)
-          DB_USER_FROM_FILE=$(cat /tmp/db_user)
-          DB_PASSWORD_FROM_FILE=$(cat /tmp/db_password)
-
-          echo "DB_HOST from file: '$DB_HOST_FROM_FILE'"
-          echo "DB_USER from file: '$DB_USER_FROM_FILE'"
-          echo "DB_PASSWORD from file: '$(echo $DB_PASSWORD_FROM_FILE | head -c 10)...'"
-
-          # Exportar as variáveis para os próximos steps
-          echo "DB_HOST_VALUE=$DB_HOST_FROM_FILE" >> $GITHUB_ENV
-          echo "DB_USER_VALUE=$DB_USER_FROM_FILE" >> $GITHUB_ENV
-          echo "DB_PASSWORD_VALUE=$DB_PASSWORD_FROM_FILE" >> $GITHUB_ENV
+          # Load database configuration from artifacts
+          echo "DB_HOST_VALUE=$(cat /tmp/db_host)" >> $GITHUB_ENV
+          echo "DB_USER_VALUE=$(cat /tmp/db_user)" >> $GITHUB_ENV
+          echo "DB_PASSWORD_VALUE=$(cat /tmp/db_password)" >> $GITHUB_ENV
+          echo "✅ Database configuration loaded"
 
       - name: Set up AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -172,7 +90,7 @@ jobs:
       - name: Install Serverless Framework
         run: npm install -g serverless
 
-      - name: Deploy Customer Lambda
+      - name: Deploy Lambda Function
         run: sls deploy --stage main --config serverless-prod.yml
         env:
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
