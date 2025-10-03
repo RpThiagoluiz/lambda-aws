@@ -85,10 +85,10 @@ jobs:
           echo "HOST com delimitadores: |$(cat db_host.txt)|"
           echo "HOST hex dump: $(cat db_host.txt | hexdump -C | head -1)"
 
-          # Simplificando a limpeza - só remover quebras de linha
-          DB_HOST_VALUE=$(cat db_host.txt | tr -d '\n')
-          DB_USER_VALUE=$(cat db_user.txt | tr -d '\n')
-          DB_PASSWORD_VALUE=$(cat db_password.txt | tr -d '\n')
+          # Limpeza mais robusta - remover quebras de linha, espaços e caracteres invisíveis
+          DB_HOST_VALUE=$(cat db_host.txt | tr -d '\n\r\t ' | sed 's/[[:space:]]//g')
+          DB_USER_VALUE=$(cat db_user.txt | tr -d '\n\r\t ' | sed 's/[[:space:]]//g')
+          DB_PASSWORD_VALUE=$(cat db_password.txt | tr -d '\n\r\t ')
 
           echo "=== VALORES LIMPOS PARA OUTPUTS ==="
           echo "db_host: '${DB_HOST_VALUE}'"
@@ -96,9 +96,24 @@ jobs:
           echo "db_password: '$(echo ${DB_PASSWORD_VALUE} | head -c 10)...'"
           echo "db_host length: ${#DB_HOST_VALUE}"
 
-          echo "db_host=${DB_HOST_VALUE}" >> $GITHUB_OUTPUT
-          echo "db_user=${DB_USER_VALUE}" >> $GITHUB_OUTPUT
-          echo "db_password=${DB_PASSWORD_VALUE}" >> $GITHUB_OUTPUT
+          # Verificar se valores estão vazios e forçar saída se necessário
+          if [ -z "$DB_HOST_VALUE" ]; then
+            echo "❌ ERRO: DB_HOST está vazio após limpeza!"
+            exit 1
+          fi
+
+          # Escapar caracteres especiais para o output
+          echo "db_host<<EOF" >> $GITHUB_OUTPUT
+          echo "$DB_HOST_VALUE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "db_user<<EOF" >> $GITHUB_OUTPUT
+          echo "$DB_USER_VALUE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "db_password<<EOF" >> $GITHUB_OUTPUT
+          echo "$DB_PASSWORD_VALUE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
   deploy:
     runs-on: ubuntu-latest
