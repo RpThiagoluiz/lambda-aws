@@ -73,7 +73,11 @@ jobs:
 
       - name: Load database configuration
         run: |
-          # Load database configuration from artifacts
+          # Load database configuration from artifacts (values will be masked)
+          echo "::add-mask::$(cat /tmp/db_host)"
+          echo "::add-mask::$(cat /tmp/db_user)"
+          echo "::add-mask::$(cat /tmp/db_password)"
+
           echo "DB_HOST_VALUE=$(cat /tmp/db_host)" >> $GITHUB_ENV
           echo "DB_USER_VALUE=$(cat /tmp/db_user)" >> $GITHUB_ENV
           echo "DB_PASSWORD_VALUE=$(cat /tmp/db_password)" >> $GITHUB_ENV
