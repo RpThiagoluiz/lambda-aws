@@ -102,18 +102,25 @@ jobs:
             exit 1
           fi
 
-          # Escapar caracteres especiais para o output
-          echo "db_host<<EOF" >> $GITHUB_OUTPUT
-          echo "$DB_HOST_VALUE" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Salvar como arquivos para evitar masking do GitHub
+          echo "$DB_HOST_VALUE" > /tmp/db_host
+          echo "$DB_USER_VALUE" > /tmp/db_user  
+          echo "$DB_PASSWORD_VALUE" > /tmp/db_password
 
-          echo "db_user<<EOF" >> $GITHUB_OUTPUT
-          echo "$DB_USER_VALUE" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Também definir como outputs (mesmo que sejam mascarados)
+          echo "db_host=$DB_HOST_VALUE" >> $GITHUB_OUTPUT
+          echo "db_user=$DB_USER_VALUE" >> $GITHUB_OUTPUT
+          echo "db_password=$DB_PASSWORD_VALUE" >> $GITHUB_OUTPUT
 
-          echo "db_password<<EOF" >> $GITHUB_OUTPUT
-          echo "$DB_PASSWORD_VALUE" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Upload database config as artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: db-config
+          path: |
+            /tmp/db_host
+            /tmp/db_user
+            /tmp/db_password
+          retention-days: 1
 
   deploy:
     runs-on: ubuntu-latest
@@ -132,14 +139,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Debug received outputs
+      - name: Download database config
+        uses: actions/download-artifact@v3
+        with:
+          name: db-config
+          path: /tmp/
+
+      - name: Load database config and debug
         run: |
-          echo "=== DEBUG: Valores recebidos do remote-config ==="
-          echo "db_host: '${{ needs.remote-config.outputs.db_host }}'"
-          echo "db_user: '${{ needs.remote-config.outputs.db_user }}'"
-          echo "db_password: '${{ needs.remote-config.outputs.db_password }}'"
-          echo "db_host length: $(echo '${{ needs.remote-config.outputs.db_host }}' | wc -c)"
-          echo "============================================="
+          echo "=== CARREGANDO CONFIGURAÇÕES DO BANCO ==="
+          DB_HOST_FROM_FILE=$(cat /tmp/db_host)
+          DB_USER_FROM_FILE=$(cat /tmp/db_user)
+          DB_PASSWORD_FROM_FILE=$(cat /tmp/db_password)
+
+          echo "DB_HOST from file: '$DB_HOST_FROM_FILE'"
+          echo "DB_USER from file: '$DB_USER_FROM_FILE'"
+          echo "DB_PASSWORD from file: '$(echo $DB_PASSWORD_FROM_FILE | head -c 10)...'"
+
+          # Exportar as variáveis para os próximos steps
+          echo "DB_HOST_VALUE=$DB_HOST_FROM_FILE" >> $GITHUB_ENV
+          echo "DB_USER_VALUE=$DB_USER_FROM_FILE" >> $GITHUB_ENV
+          echo "DB_PASSWORD_VALUE=$DB_PASSWORD_FROM_FILE" >> $GITHUB_ENV
 
       - name: Set up AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -156,8 +176,8 @@ jobs:
         run: sls deploy --stage main --config serverless-prod.yml
         env:
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-          DB_HOST: ${{ needs.remote-config.outputs.db_host }}
+          DB_HOST: ${{ env.DB_HOST_VALUE }}
           DB_PORT: ${{ secrets.DB_PORT }}
           DB_NAME: ${{ secrets.DB_NAME }}
-          DB_USER: ${{ needs.remote-config.outputs.db_user }}
-          DB_PASSWORD: ${{ needs.remote-config.outputs.db_password }}
+          DB_USER: ${{ env.DB_USER_VALUE }}
+          DB_PASSWORD: ${{ env.DB_PASSWORD_VALUE }}
